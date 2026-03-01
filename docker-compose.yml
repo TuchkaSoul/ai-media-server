@@ -1,0 +1,24 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: pg_main
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: mediahub
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - pg_data:/var/lib/postgresql/data
+
+  vector_db:
+    image: milvusdb/milvus:v2.3.4
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - ./db/vector_db:/milvus/configs
+
+volumes:
+  pg_data:
