@@ -1,24 +1,105 @@
 services:
-  postgres:
-    image: postgres:15
-    container_name: pg_main
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    container_name: api
+    env_file:
+      - .env
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin123
-      POSTGRES_DB: mediahub
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VECTOR_DB_URL: http://qdrant:6333
+      LOKI_URL: http://loki:3100
+      STORAGE_PATH: /storage
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage/videos:/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  worker:
+    build:
+      context: .
+      dockerfile: services/worker/Dockerfile
+    container_name: worker
+    env_file:
+      - .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      VECTOR_DB_URL: http://qdrant:6333
+      LOKI_URL: http://loki:3100
+      STORAGE_PATH: /storage
+    command: celery -A worker.celery_app.celery_app worker --loglevel=info
+    volumes:
+      - ./storage/videos:/storage
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    env_file:
+      - .env
     ports:
       - "5432:5432"
     volumes:
-      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
-      - pg_data:/var/lib/postgresql/data
+      - ./db/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  vector_db:
-    image: milvusdb/milvus:v2.3.4
+  redis:
+    image: redis:7-alpine
+    container_name: redis
     ports:
-      - "19530:19530"
-      - "9091:9091"
+      - "6379:6379"
     volumes:
-      - ./db/vector_db:/milvus/configs
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./configs/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
 
 volumes:
-  pg_data:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  loki_data:
