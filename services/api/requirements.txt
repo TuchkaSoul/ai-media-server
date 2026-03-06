@@ -3,3 +3,5 @@ uvicorn[standard]==0.34.0
 redis==5.2.1
 psycopg2-binary==2.9.10
 qdrant-client==1.13.3
+SQLAlchemy==2.0.38
+alembic==1.14.1
