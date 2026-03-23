@@ -4,7 +4,7 @@ pydantic>=2.6.0
 
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.9
-
+python-onvif-zeep
 redis>=5.0.0
 
 opencv-python>=4.8.0
