@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from typing import Any, Callable
@@ -8,10 +7,11 @@ from typing import Any, Callable
 import cv2
 import numpy as np
 
+from common.structured_logging import get_logger
 from .frame_queue import FrameBuffer
 from .models import ConnectionStatus, FrameData, VideoSourceConfig, VideoSourceType
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class StreamReader:
@@ -63,7 +63,10 @@ class StreamReader:
             except Exception as exc:
                 self.status = ConnectionStatus.ERROR
                 self.last_error = str(exc)
-                logger.error("Ошибка построения источника %s: %s", self.config.source_id, exc)
+                logger.error(
+                    "Ошибка построения источника",
+                    extra={"event": "source_build_error", "source_id": self.config.source_id, "error": str(exc)},
+                )
                 return False
 
             backend = self._select_backend()
@@ -72,7 +75,10 @@ class StreamReader:
             if not cap or not cap.isOpened():
                 self.status = ConnectionStatus.ERROR
                 self.last_error = f"Не удалось открыть источник {self.config.source_id}"
-                logger.error(self.last_error)
+                logger.error(
+                    self.last_error,
+                    extra={"event": "source_open_failed", "source_id": self.config.source_id},
+                )
                 if cap:
                     cap.release()
                 return False
@@ -90,7 +96,16 @@ class StreamReader:
             self.cap = cap
             self.status = ConnectionStatus.CONNECTED
             self._source_exhausted = False
-            logger.info("Подключен источник %s (%s)", self.config.source_id, self.config.source_type.value)
+            logger.info(
+                "Подключен источник",
+                extra={
+                    "event": "camera_connected",
+                    "source_id": self.config.source_id,
+                    "camera_id": self.config.camera_id,
+                    "source_type": self.config.source_type.value,
+                    "fps_target": self.config.fps,
+                },
+            )
             return True
 
     def disconnect(self) -> None:
@@ -158,7 +173,10 @@ class StreamReader:
 
             if self._is_reconnectable():
                 if not self._reconnect():
-                    logger.error("Исчерпаны попытки переподключения для %s", self.config.source_id)
+                    logger.error(
+                        "Исчерпаны попытки переподключения",
+                        extra={"event": "reconnect_exhausted", "source_id": self.config.source_id},
+                    )
                     with self.lock:
                         self.running = False
                         self.status = ConnectionStatus.ERROR
@@ -221,6 +239,15 @@ class StreamReader:
         buffered = self.frame_buffer.put_latest(frame_data)
         if not buffered:
             self.stats["frames_dropped"] += 1
+            logger.warning(
+                "Кадр отброшен из-за переполнения буфера",
+                extra={
+                    "event": "frame_dropped",
+                    "source_id": self.config.source_id,
+                    "camera_id": self.config.camera_id,
+                    "frame_id": frame_data.frame_number,
+                },
+            )
             return
 
         self.stats["frames_dropped"] = self.frame_buffer.dropped_frames
@@ -235,7 +262,10 @@ class StreamReader:
             try:
                 callback(frame_data)
             except Exception as exc:
-                logger.exception("Ошибка frame callback для %s: %s", self.config.source_id, exc)
+                logger.exception(
+                    "Ошибка frame callback",
+                    extra={"event": "frame_callback_error", "source_id": self.config.source_id},
+                )
 
     def _update_fps_stats(self) -> None:
         now = time.monotonic()
@@ -245,6 +275,17 @@ class StreamReader:
             self.stats["avg_fps"] = frames_delta / elapsed
             self._fps_calc_time = now
             self._fps_calc_frames = self.frame_count
+            logger.info(
+                "Обновлена статистика потока",
+                extra={
+                    "event": "capture_stats",
+                    "source_id": self.config.source_id,
+                    "camera_id": self.config.camera_id,
+                    "fps_actual": round(self.stats["avg_fps"], 2),
+                    "frames_received": self.stats["frames_received"],
+                    "frames_dropped": self.stats["frames_dropped"],
+                },
+            )
 
     def _reconnect(self) -> bool:
         for attempt in range(1, max(1, self.config.reconnect_attempts) + 1):
@@ -255,10 +296,14 @@ class StreamReader:
                 self.stats["reconnect_attempts"] += 1
 
             logger.warning(
-                "Переподключение источника %s, попытка %s/%s",
-                self.config.source_id,
-                attempt,
-                self.config.reconnect_attempts,
+                "Переподключение источника",
+                extra={
+                    "event": "camera_reconnect_attempt",
+                    "source_id": self.config.source_id,
+                    "camera_id": self.config.camera_id,
+                    "attempt": attempt,
+                    "attempts_total": self.config.reconnect_attempts,
+                },
             )
             time.sleep(self.config.reconnect_delay)
             if self.connect():
@@ -324,5 +369,9 @@ class StreamReader:
             try:
                 self.cap.release()
             except Exception:
-                logger.debug("Не удалось корректно освободить capture %s", self.config.source_id, exc_info=True)
+                logger.debug(
+                    "Не удалось корректно освободить capture",
+                    extra={"event": "capture_release_failed", "source_id": self.config.source_id},
+                    exc_info=True,
+                )
         self.cap = None

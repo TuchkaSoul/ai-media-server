@@ -15,7 +15,11 @@ from app.db.models import Camera, Detection, Event, FrameMetadata, VideoSegment
 from app.db.session import SessionLocal
 from app.schemas import CameraRuntimeStatus, FrameAnalysisIngest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+_CURRENT_FILE = Path(__file__).resolve()
+REPO_ROOT = next(
+    (parent for parent in [_CURRENT_FILE.parent, *_CURRENT_FILE.parents] if (parent / "services").exists()),
+    _CURRENT_FILE.parents[2],
+)
 SERVICES_DIR = REPO_ROOT / "services"
 if str(SERVICES_DIR) not in sys.path:
     sys.path.append(str(SERVICES_DIR))

@@ -10,8 +10,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       VECTOR_DB_URL: http://qdrant:6333
-      LOKI_URL: http://loki:3100
       STORAGE_PATH: /storage
+      LOG_LEVEL: INFO
+      LOG_FALLBACK_FILE: /tmp/api-errors.log
     ports:
       - "8000:8000"
     volumes:
@@ -22,6 +23,8 @@ services:
       redis:
         condition: service_healthy
       qdrant:
+        condition: service_started
+      loki:
         condition: service_started
 
   worker:
@@ -36,8 +39,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       VECTOR_DB_URL: http://qdrant:6333
-      LOKI_URL: http://loki:3100
       STORAGE_PATH: /storage
+      LOG_LEVEL: INFO
+      LOG_FALLBACK_FILE: /tmp/worker-errors.log
     command: celery -A worker.celery_app.celery_app worker --loglevel=info
     volumes:
       - ./storage/videos:/storage
@@ -47,6 +51,30 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
+        condition: service_started
+      loki:
+        condition: service_started
+
+  video_stream:
+    build:
+      context: .
+      dockerfile: services/video_stream/Dockerfile
+    container_name: video_stream
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      VIDEO_STREAM_PUSH_METADATA: "true"
+      VIDEO_STREAM_METADATA_QUEUE: video:frames:metadata
+      VIDEO_STREAM_AUTO_DISCOVER_USB: "false"
+      LOG_LEVEL: INFO
+      LOG_FALLBACK_FILE: /tmp/video-stream-errors.log
+    ports:
+      - "8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      loki:
         condition: service_started
 
   postgres:
@@ -97,8 +125,36 @@ services:
       - ./configs/loki-config.yml:/etc/loki/local-config.yaml:ro
       - loki_data:/loki
 
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: promtail
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./configs/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      loki:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:11.0.0
+    container_name: grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./configs/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      loki:
+        condition: service_started
+
 volumes:
   postgres_data:
   redis_data:
   qdrant_data:
   loki_data:
+  grafana_data:

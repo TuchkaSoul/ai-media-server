@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-import logging
-
 import cv2
 
+from common.structured_logging import get_logger, setup_logging
 from .camera_manager import CameraManager, VideoSourceFactory
 from .models import ConnectionStatus, FrameData, VideoSourceConfig, VideoSourceType
 from .preprocessor import ScenePreprocessor, SceneScore
 from .stream_reader import StreamReader
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 VideoSource = StreamReader
 MultiSourceManager = CameraManager
@@ -42,7 +41,7 @@ def _demo_configs() -> list[VideoSourceConfig]:
 def _run_graphical_demo() -> None:
     """Ручной запуск модуля для локальной проверки потока и предобработки."""
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    setup_logging("video_stream_demo")
     manager = CameraManager()
 
     for config in _demo_configs():

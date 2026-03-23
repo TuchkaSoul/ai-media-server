@@ -1,17 +1,17 @@
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from typing import Any, Callable, Protocol
 
 import cv2
 
+from common.structured_logging import get_logger
 from .models import FrameData, VideoSourceConfig, VideoSourceType
 from .preprocessor import ScenePreprocessor
 from .stream_reader import StreamReader
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class FrameProcessor(Protocol):
@@ -38,7 +38,10 @@ class VideoSourceFactory:
     @staticmethod
     def create_source(config: VideoSourceConfig) -> StreamReader | None:
         if config.source_type not in VideoSourceFactory.SUPPORTED_SOURCE_TYPES:
-            logger.error("Тип источника пока не поддерживается: %s", config.source_type.value)
+            logger.error(
+                "Тип источника пока не поддерживается",
+                extra={"event": "unsupported_source_type", "source_type": config.source_type.value},
+            )
             return None
         return StreamReader(config)
 
@@ -68,7 +71,10 @@ class VideoSourceFactory:
                 additional_params=dict(config_dict.get("additional_params", {})),
             )
         except Exception as exc:
-            logger.error("Ошибка создания конфигурации источника: %s", exc)
+            logger.error(
+                "Ошибка создания конфигурации источника",
+                extra={"event": "source_config_error", "error": str(exc)},
+            )
             return None
 
     @staticmethod
@@ -95,7 +101,10 @@ class CameraManager:
     def add_source(self, config: VideoSourceConfig) -> bool:
         with self.lock:
             if config.source_id in self.sources:
-                logger.warning("Источник %s уже существует", config.source_id)
+                logger.warning(
+                    "Источник уже существует",
+                    extra={"event": "source_duplicate", "source_id": config.source_id},
+                )
                 return False
 
             reader = VideoSourceFactory.create_source(config)
@@ -108,6 +117,16 @@ class CameraManager:
             if self.running:
                 reader.start_capture()
 
+            logger.info(
+                "Источник зарегистрирован",
+                extra={
+                    "event": "source_registered",
+                    "source_id": config.source_id,
+                    "camera_id": config.camera_id,
+                    "source_type": config.source_type.value,
+                },
+            )
+
             return True
 
     def remove_source(self, source_id: str) -> None:
@@ -115,6 +134,7 @@ class CameraManager:
             reader = self.sources.pop(source_id, None)
         if reader is not None:
             reader.stop_capture()
+            logger.info("Источник удален", extra={"event": "source_removed", "source_id": source_id})
 
     def has_source(self, source_id: str) -> bool:
         with self.lock:
@@ -226,13 +246,16 @@ class CameraManager:
             try:
                 processed_frame = processor.process(processed_frame)
             except Exception as exc:
-                logger.exception("Ошибка этапа обработки кадра %s: %s", processor.__class__.__name__, exc)
+                logger.exception(
+                    "Ошибка этапа обработки кадра",
+                    extra={"event": "frame_processor_error", "processor": processor.__class__.__name__},
+                )
 
         for handler in self.frame_handlers:
             try:
                 handler(processed_frame)
             except Exception as exc:
-                logger.exception("Ошибка обработчика кадра в CameraManager: %s", exc)
+                logger.exception("Ошибка обработчика кадра", extra={"event": "frame_handler_error"})
 
     def _monitor_stats(self) -> None:
         while self.running:
@@ -254,9 +277,12 @@ class CameraManager:
             if stats.get("running"):
                 active_sources += 1
         logger.info(
-            "Статистика CameraManager: active=%s/%s frames=%s dropped=%s",
-            active_sources,
-            len(all_info),
-            total_frames,
-            total_dropped,
+            "Статистика CameraManager",
+            extra={
+                "event": "camera_manager_stats",
+                "active_sources": active_sources,
+                "total_sources": len(all_info),
+                "frames_received": total_frames,
+                "frames_dropped": total_dropped,
+            },
         )

@@ -1,17 +1,18 @@
 import asyncio
 import ipaddress
 import json
-import logging
 import os
 import socket
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import cv2
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from common.structured_logging import bind_log_context, new_trace_id, reset_log_context, setup_logging
 from .video_source_manager import (
     FrameData,
     MultiSourceManager,
@@ -20,7 +21,7 @@ from .video_source_manager import (
     VideoSourceType,
 )
 
-logger = logging.getLogger(__name__)
+logger = setup_logging("video_stream")
 
 
 class SourceConfigModel(BaseModel):
@@ -73,7 +74,10 @@ class RedisMetadataBridge:
                 self.last_error = str(exc)
                 self.enabled = False
                 self._backend = "disabled"
-                logger.exception("Redis bridge init error: %s", exc)
+                logger.exception(
+                    "Redis bridge init error",
+                    extra={"event": "redis_bridge_init_error", "backend": "redis"},
+                )
 
     def handle_frame(self, frame_data: FrameData) -> None:
         if not self.enabled or not self._client:
@@ -90,7 +94,15 @@ class RedisMetadataBridge:
             self.pushed_messages += 1
         except Exception as exc:
             self.last_error = str(exc)
-            logger.exception("Redis bridge push error: %s", exc)
+            logger.exception(
+                "Redis bridge push error",
+                extra={
+                    "event": "redis_bridge_push_error",
+                    "queue_name": self.queue_name,
+                    "source_id": frame_data.source_id,
+                    "frame_id": frame_data.frame_number,
+                },
+            )
 
     def stats(self) -> IntegrationStats:
         return IntegrationStats(
@@ -107,13 +119,60 @@ source_manager = MultiSourceManager()
 metadata_bridge = RedisMetadataBridge()
 
 
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    trace_id = request.headers.get("X-Request-ID") or new_trace_id()
+    token = bind_log_context(trace_id=trace_id)
+    started_at = time.perf_counter()
+    logger.info(
+        "HTTP request received",
+        extra={
+            "event": "request_received",
+            "method": request.method,
+            "path": request.url.path,
+            "client_ip": request.client.host if request.client else None,
+        },
+    )
+    try:
+        response = await call_next(request)
+    except Exception:
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        logger.exception(
+            "HTTP request failed",
+            extra={
+                "event": "request_failed",
+                "method": request.method,
+                "path": request.url.path,
+                "latency_ms": duration_ms,
+            },
+        )
+        reset_log_context(token)
+        raise
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    response.headers["X-Request-ID"] = trace_id
+    logger.info(
+        "HTTP request completed",
+        extra={
+            "event": "request_completed",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": duration_ms,
+        },
+    )
+    reset_log_context(token)
+    return response
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     source_manager.register_frame_handler(metadata_bridge.handle_frame)
+    logger.info("Video stream service started", extra={"event": "service_started"})
 
     auto_discover = os.getenv("VIDEO_STREAM_AUTO_DISCOVER_USB", "true").lower() == "true"
     if not auto_discover:
-        logger.info("USB auto-discovery disabled")
+        logger.info("USB auto-discovery disabled", extra={"event": "usb_auto_discovery_disabled"})
         return
 
     usb_cameras = source_manager.auto_discover_usb_cameras()
@@ -131,12 +190,16 @@ async def startup_event() -> None:
         )
 
     source_manager.start_all()
-    logger.info("USB cameras discovered: %s", len(usb_cameras))
+    logger.info(
+        "USB camera discovery completed",
+        extra={"event": "usb_discovery_completed", "camera_count": len(usb_cameras)},
+    )
 
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     source_manager.stop_all()
+    logger.info("Video stream service stopped", extra={"event": "service_stopped"})
 
 
 @app.get("/")
@@ -174,6 +237,16 @@ async def add_source(config: SourceConfigModel) -> JSONResponse:
     if not source_manager.add_source(video_config):
         raise HTTPException(status_code=400, detail="Не удалось добавить источник")
 
+    logger.info(
+        "Video source added",
+        extra={
+            "event": "source_added",
+            "source_id": config.source_id,
+            "camera_id": config.camera_id,
+            "source_type": config.source_type,
+        },
+    )
+
     return JSONResponse(
         {"status": "success", "message": f"Источник {config.source_id} добавлен", "source_id": config.source_id}
     )
@@ -182,6 +255,7 @@ async def add_source(config: SourceConfigModel) -> JSONResponse:
 @app.delete("/api/sources/{source_id}")
 async def remove_source(source_id: str) -> JSONResponse:
     source_manager.remove_source(source_id)
+    logger.info("Video source removed", extra={"event": "source_removed", "source_id": source_id})
     return JSONResponse({"status": "success", "message": f"Источник {source_id} удален"})
 
 
@@ -203,6 +277,7 @@ async def get_source_status(source_id: str) -> JSONResponse:
 async def start_source(source_id: str) -> JSONResponse:
     if not source_manager.start_source(source_id):
         raise HTTPException(status_code=404, detail="Источник не найден")
+    logger.info("Video source started", extra={"event": "source_started", "source_id": source_id})
     return JSONResponse({"status": "success", "message": f"Источник {source_id} запущен"})
 
 
@@ -223,6 +298,8 @@ async def restart_source(source_id: str) -> JSONResponse:
 
     if source_manager.running:
         source_manager.start_source(source_id)
+
+    logger.info("Video source restarted", extra={"event": "source_restarted", "source_id": source_id})
 
     return JSONResponse({"status": "success", "message": f"Источник {source_id} перезапущен"})
 
@@ -272,6 +349,7 @@ async def websocket_stream(websocket: WebSocket, source_id: str) -> None:
         return
 
     await websocket.accept()
+    token = bind_log_context(trace_id=new_trace_id(), source_id=source_id)
     try:
         while True:
             frame_data = source_manager.get_frame(source_id, timeout=0.3)
@@ -288,10 +366,12 @@ async def websocket_stream(websocket: WebSocket, source_id: str) -> None:
                     )
             await asyncio.sleep(0.03)
     except WebSocketDisconnect:
-        logger.info("WebSocket disconnected: %s", source_id)
+        logger.info("WebSocket disconnected", extra={"event": "websocket_disconnected", "source_id": source_id})
     except Exception as exc:
-        logger.exception("WebSocket stream error for %s: %s", source_id, exc)
+        logger.exception("WebSocket stream error", extra={"event": "websocket_stream_error", "source_id": source_id})
         await websocket.close()
+    finally:
+        reset_log_context(token)
 
 
 @app.get("/api/discover/usb")
@@ -368,4 +448,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8080)
-
