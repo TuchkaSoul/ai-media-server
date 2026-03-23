@@ -63,6 +63,8 @@ def _run_graphical_demo() -> None:
                 scene = frame_data.metadata.get("scene", {})
                 scene_level = scene.get("level", "unknown")
                 scene_score = scene.get("score", 0.0)
+                anomaly_score = scene.get("anomaly_score", 0.0)
+                event_state = scene.get("event_state", "unknown")
 
                 cv2.putText(
                     frame,
@@ -80,6 +82,15 @@ def _run_graphical_demo() -> None:
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.7,
                     (0, 200, 255),
+                    2,
+                )
+                cv2.putText(
+                    frame,
+                    f"event={event_state} anomaly={anomaly_score:.2f}",
+                    (20, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 200, 0),
                     2,
                 )
                 cv2.imshow(f"StreamReader: {source_id}", frame)

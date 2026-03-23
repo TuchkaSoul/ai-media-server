@@ -13,7 +13,12 @@ router = APIRouter(tags=["media"])
 MediaServiceDep = Annotated[MediaQueryService, Depends(get_media_query_service)]
 
 
-@router.get("/segments", response_model=list[SegmentRead])
+@router.get(
+    "/segments",
+    response_model=list[SegmentRead],
+    summary="List segments",
+    description="Returns persisted video segments, optionally filtered by camera.",
+)
 def list_segments(
     service: MediaServiceDep,
     camera_id: int | None = None,
@@ -22,7 +27,12 @@ def list_segments(
     return service.list_segments(camera_id=camera_id, limit=limit)
 
 
-@router.get("/segments/{segment_id}", response_model=SegmentRead)
+@router.get(
+    "/segments/{segment_id}",
+    response_model=SegmentRead,
+    summary="Get segment",
+    description="Returns one persisted segment by identifier.",
+)
 def get_segment(segment_id: int, service: MediaServiceDep) -> SegmentRead:
     segment = service.get_segment(segment_id)
     if segment is None:
@@ -30,7 +40,12 @@ def get_segment(segment_id: int, service: MediaServiceDep) -> SegmentRead:
     return segment
 
 
-@router.get("/frames", response_model=list[FrameMetadataRead])
+@router.get(
+    "/frames",
+    response_model=list[FrameMetadataRead],
+    summary="List frames",
+    description="Returns persisted frame metadata, optionally filtered by camera or segment.",
+)
 def list_frames(
     service: MediaServiceDep,
     camera_id: int | None = None,
@@ -40,7 +55,12 @@ def list_frames(
     return service.list_frames(camera_id=camera_id, segment_id=segment_id, limit=limit)
 
 
-@router.get("/frames/{frame_id}", response_model=FrameMetadataRead)
+@router.get(
+    "/frames/{frame_id}",
+    response_model=FrameMetadataRead,
+    summary="Get frame metadata",
+    description="Returns one persisted frame metadata record by identifier.",
+)
 def get_frame(frame_id: int, service: MediaServiceDep) -> FrameMetadataRead:
     frame = service.get_frame(frame_id)
     if frame is None:
@@ -48,7 +68,12 @@ def get_frame(frame_id: int, service: MediaServiceDep) -> FrameMetadataRead:
     return frame
 
 
-@router.get("/detections", response_model=list[DetectionRead])
+@router.get(
+    "/detections",
+    response_model=list[DetectionRead],
+    summary="List detections",
+    description="Returns persisted detections, optionally filtered by frame or camera.",
+)
 def list_detections(
     service: MediaServiceDep,
     frame_id: int | None = None,
@@ -58,7 +83,12 @@ def list_detections(
     return service.list_detections(frame_id=frame_id, camera_id=camera_id, limit=limit)
 
 
-@router.get("/events", response_model=list[EventRead])
+@router.get(
+    "/events",
+    response_model=list[EventRead],
+    summary="List events",
+    description="Returns persisted domain events, optionally filtered by camera or segment.",
+)
 def list_events(
     service: MediaServiceDep,
     camera_id: int | None = None,

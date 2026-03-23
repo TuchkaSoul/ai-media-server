@@ -11,7 +11,11 @@ from app.dependencies import get_db
 router = APIRouter(tags=["system"])
 
 
-@router.get("/")
+@router.get(
+    "/",
+    summary="API overview",
+    description="Returns basic information about the service and current timestamp.",
+)
 def root() -> dict[str, str]:
     return {
         "service": "api",
@@ -21,7 +25,11 @@ def root() -> dict[str, str]:
     }
 
 
-@router.get("/health")
+@router.get(
+    "/health",
+    summary="Health check",
+    description="Checks that the API process is alive and the database is reachable.",
+)
 def health(db: Session = Depends(get_db)) -> dict[str, str]:
     db.execute(text("SELECT 1"))
     return {"status": "healthy"}
