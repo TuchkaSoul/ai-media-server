@@ -1,15 +1,15 @@
 from app.db.base import Base
-from app.db.models import Alert, AnalysisTask, Camera, Detection, User, Video
-from app.db.session import SessionLocal, engine
+from app.db.models import Camera, Detection, Event, FrameMetadata, VideoSegment
+from app.db.session import SessionLocal, engine, get_db
 
 __all__ = [
-    "Alert",
-    "AnalysisTask",
     "Base",
     "Camera",
     "Detection",
+    "Event",
+    "FrameMetadata",
     "SessionLocal",
-    "User",
-    "Video",
+    "VideoSegment",
     "engine",
+    "get_db",
 ]

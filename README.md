@@ -349,3 +349,27 @@ models/
 * Ролевой доступ (admin/operator/viewer)
 * Хэширование паролей (bcrypt)
 * Ограничение потоков
+
+---
+
+# 11. Текущий E2E pipeline
+
+Основной backend: `services/api`
+
+Legacy-слой: `services/orm_api.py` заморожен и не должен использоваться как точка входа.
+
+Рабочий сценарий MVP:
+
+1. `POST /cameras` регистрирует USB/web/IP-камеру или web URL.
+2. `POST /cameras/{id}/start` подключает источник через `services/video_stream`.
+3. API открывает активный `VideoSegment` и пишет метаданные кадров в PostgreSQL и `storage/videos/.../frames.jsonl`.
+4. `GET /cameras/{id}/snapshot` отдает живой кадр.
+5. `POST /frames/{frame_id}/analysis` принимает детекции/события от будущего analyzer/worker.
+
+Ядро текущей схемы:
+
+* `Camera`
+* `VideoSegment`
+* `FrameMetadata`
+* `Detection`
+* `Event`

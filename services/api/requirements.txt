@@ -5,3 +5,6 @@ psycopg2-binary==2.9.10
 qdrant-client==1.13.3
 SQLAlchemy==2.0.38
 alembic==1.14.1
+opencv-python-headless==4.11.0.86
+numpy==2.2.4
+requests==2.32.3
