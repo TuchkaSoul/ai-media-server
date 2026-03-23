@@ -1,10 +1,11 @@
+import os
+import subprocess
 import time
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 
 from app.core.logging import bind_log_context, new_trace_id, reset_log_context, setup_logging
-from app.db import Base, engine
 from app.dependencies import pipeline_service
 from app.routes import api_router
 
@@ -89,11 +90,16 @@ def docs_redirect() -> RedirectResponse:
     return RedirectResponse(url="/swagger")
 
 
+def run_migrations() -> None:
+    if os.getenv("API_RUN_MIGRATIONS_ON_START", "false").lower() != "true":
+        return
+
+    subprocess.run(["alembic", "upgrade", "head"], check=True)
+
+
 @app.on_event("startup")
 def startup() -> None:
-    with engine.begin() as conn:
-        conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS mediahub")
-    Base.metadata.create_all(bind=engine)
+    run_migrations()
     pipeline_service.startup()
     logger.info("API service started", extra={"event": "service_started"})
 

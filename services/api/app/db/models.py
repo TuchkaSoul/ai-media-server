@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Identity, Integer, Numeric, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Identity, Integer, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -77,7 +77,12 @@ class FrameMetadata(Base):
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     ingest_latency_ms: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     has_detections: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
-    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    attributes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -99,7 +104,12 @@ class Detection(Base):
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(6, 5), nullable=True)
     track_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     bbox: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    attributes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -122,7 +132,12 @@ class Event(Base):
     )
     event_type: Mapped[str] = mapped_column(String(128), nullable=False)
     importance_score: Mapped[Decimal | None] = mapped_column(Numeric(6, 5), nullable=True)
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

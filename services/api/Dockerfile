@@ -11,6 +11,7 @@ COPY services/api/app /app/app
 COPY services/api/alembic /app/alembic
 COPY services/api/alembic.ini /app/alembic.ini
 COPY services/video_stream /app/services/video_stream
+COPY services/analyzer /app/services/analyzer
 
 EXPOSE 8000
 

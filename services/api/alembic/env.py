@@ -4,7 +4,7 @@ import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 
 from app.db.base import Base
 from app.db import models  # noqa: F401
@@ -19,6 +19,10 @@ if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
 target_metadata = Base.metadata
+
+
+def ensure_schema(connection) -> None:
+    connection.execute(text("CREATE SCHEMA IF NOT EXISTS mediahub"))
 
 
 def run_migrations_offline() -> None:
@@ -44,6 +48,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        ensure_schema(connection)
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

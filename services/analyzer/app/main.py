@@ -1,79 +1,66 @@
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import cv2
-import numpy as np
-import datetime
 
-# Захват с камеры
-cap = cv2.VideoCapture(0)
+from analyzer.app.engine import SemanticAnalyzer
+from video_stream.models import FrameData
+from video_stream.preprocessor import ScenePreprocessor
 
-# Кодек и инициализация записи
-fourcc = cv2.VideoWriter_fourcc(*'XVID')
-out = None
 
-# Параметры
+def run_demo(source: str) -> None:
+    cap = cv2.VideoCapture(0 if source == "0" else source)
+    if not cap.isOpened():
+        raise RuntimeError(f"Unable to open source: {source}")
 
-# Чувствительность системы движения
-threshold = 50       # чувствительность
-min_area = 500       # минимальный размер "события"
+    preprocessor = ScenePreprocessor()
+    analyzer = SemanticAnalyzer()
+    frame_number = 0
+    output_dir = Path("analyzer_demo_output")
+    output_dir.mkdir(exist_ok=True)
 
-save_seconds = 3     # сколько секунд сохранять после события
-frame_buffer = []    # буфер для хранения последних кадров
-event_active = False
-event_timer = 0
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+            raw = FrameData(
+                frame=frame,
+                timestamp=cv2.getTickCount() / cv2.getTickFrequency(),
+                frame_number=frame_number,
+                source_id="demo_source",
+            )
+            processed = analyzer.analyze(preprocessor.process(raw))
+            analysis = processed.metadata.get("analysis", {})
+            description = processed.metadata.get("descriptions", {}).get("short", "")
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (21, 21), 0)
+            overlay = processed.frame.copy()
+            cv2.putText(overlay, f"scene={analysis.get('scene_label', 'n/a')}", (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
+            cv2.putText(overlay, f"score={processed.scene_score:.2f} anomaly={processed.anomaly_score:.2f}", (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(overlay, description[:90], (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
-    # Первичный кадр для сравнения
-    if len(frame_buffer) == 0:
-        frame_buffer.append(gray)
-        continue
+            if analysis.get("keyframe", {}).get("should_save"):
+                keyframe_path = output_dir / f"keyframe_{frame_number:06d}.jpg"
+                cv2.imwrite(str(keyframe_path), processed.frame)
 
-    # Разница между текущим и предыдущим кадром
-    delta = cv2.absdiff(frame_buffer[-1], gray)
-    thresh = cv2.threshold(delta, threshold, 255, cv2.THRESH_BINARY)[1]
-    thresh = cv2.dilate(thresh, None, iterations=2)
-    contours, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.imshow("Analyzer Demo", overlay)
+            frame_number += 1
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
 
-    motion_detected = False
-    for c in contours:
-        if cv2.contourArea(c) > min_area:
-            motion_detected = True
-            break
 
-    if motion_detected:
-        if not event_active:
-            print("Событие началось!")
-            event_active = True
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            out = cv2.VideoWriter(f"event_{timestamp}.avi", fourcc, 20.0, (frame.shape[1], frame.shape[0]))
-        event_timer = save_seconds * 30  # сбрасываем таймер, если движение есть
-    else:
-        if event_active:
-            event_timer -= 1
-            if event_timer <= 0:
-                print("Событие закончилось.")
-                event_active = False
-                out.release()
-                out = None
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Semantic analyzer demo")
+    parser.add_argument("--source", default="0", help="Camera index or path/URL")
+    args = parser.parse_args()
+    run_demo(args.source)
 
-    # Обновляем буфер
-    frame_buffer = [gray]
 
-    # Отображение
-    cv2.imshow("Camera", frame)
-    # cv2.imshow("Thresh", thresh)
-    # cv2.imshow("Delta", delta)
-
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-cap.release()
-if out:
-    out.release()
-cv2.destroyAllWindows()
-## ffmpeg
+if __name__ == "__main__":
+    main()

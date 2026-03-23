@@ -7,6 +7,7 @@ from typing import Any, Callable
 import cv2
 
 from common.structured_logging import get_logger
+from analyzer.app import SemanticAnalyzer
 from .consumer import DebugConsumer
 from .frame_queue import ProcessedFrameQueue
 from .models import ProcessedFrame, VideoSourceConfig, VideoSourceType
@@ -90,6 +91,7 @@ class CameraManager:
         self.running = False
         self.frame_handlers: list[Callable[[ProcessedFrame], None]] = [DebugConsumer().handle]
         self.preprocessor = ScenePreprocessor()
+        self.semantic_analyzer = SemanticAnalyzer()
         self.stats_interval = 5.0
         self.last_stats_time = time.time()
         self._monitor_thread: threading.Thread | None = None
@@ -305,6 +307,7 @@ class CameraManager:
 
             try:
                 processed_frame = self.preprocessor.process(frame_data)
+                processed_frame = self.semantic_analyzer.analyze(processed_frame)
             except Exception:
                 logger.exception(
                     "Ошибка этапа обработки кадра",

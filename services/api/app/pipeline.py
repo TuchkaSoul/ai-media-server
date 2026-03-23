@@ -10,7 +10,10 @@ from threading import RLock
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
+from app.batch_writer import FrameBatchWriter, PendingFrame
+from app.core.logging import get_logger
 from app.db.models import Camera, Detection, Event, FrameMetadata, VideoSegment
 from app.db.session import SessionLocal
 from app.schemas import CameraRuntimeStatus, FrameAnalysisIngest
@@ -25,6 +28,8 @@ if str(SERVICES_DIR) not in sys.path:
     sys.path.append(str(SERVICES_DIR))
 
 from video_stream.video_source_manager import MultiSourceManager, ProcessedFrame, VideoSourceConfig, VideoSourceFactory
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -45,11 +50,19 @@ class CameraPipelineService:
         self.storage_root = Path(os.getenv("STORAGE_PATH", str(REPO_ROOT / "storage" / "videos")))
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.auto_start = os.getenv("API_AUTO_START_CAMERAS", "false").lower() == "true"
+        self.frame_batch_size = max(1, int(os.getenv("API_FRAME_BATCH_SIZE", "50")))
+        self.frame_flush_interval = max(0.05, float(os.getenv("API_FRAME_FLUSH_INTERVAL", "1.0")))
         self.runtime: dict[int, RuntimeState] = {}
         self.source_to_camera: dict[str, int] = {}
         self.lock = RLock()
+        self.batch_writer = FrameBatchWriter(
+            self._flush_frame_batch,
+            batch_size=self.frame_batch_size,
+            flush_interval=self.frame_flush_interval,
+        )
 
     def startup(self) -> None:
+        self.batch_writer.start()
         if not self.auto_start:
             return
 
@@ -60,6 +73,7 @@ class CameraPipelineService:
 
     def shutdown(self) -> None:
         self.source_manager.stop_all()
+        self.batch_writer.stop()
         with self.lock:
             camera_ids = list(self.runtime.keys())
         for camera_id in camera_ids:
@@ -204,68 +218,106 @@ class CameraPipelineService:
         if camera_id is None:
             return
 
+        self.batch_writer.submit(PendingFrame(camera_id=camera_id, source_id=frame_data.source_id, frame_data=frame_data))
+
+    def _flush_frame_batch(self, batch: list[PendingFrame]) -> None:
         with SessionLocal() as db:
-            camera = db.get(Camera, camera_id)
-            if camera is None:
-                return
+            try:
+                for item in batch:
+                    frame_data = item.frame_data
+                    camera = db.get(Camera, item.camera_id)
+                    if camera is None:
+                        continue
 
-            segment = self._ensure_active_segment(camera, db, frame_data.timestamp)
-            captured_at = datetime.fromtimestamp(frame_data.timestamp, tz=UTC)
-            frame = FrameMetadata(
-                camera_id=camera.id,
-                segment_id=segment.id,
-                frame_number=frame_data.frame_number,
-                captured_at=captured_at,
-                width=int(frame_data.frame.shape[1]),
-                height=int(frame_data.frame.shape[0]),
-                ingest_latency_ms=round(max(0.0, (datetime.now(UTC) - captured_at).total_seconds() * 1000), 3),
-                has_detections=bool(frame_data.metadata.get("detections")),
-                attributes=self._build_frame_attributes(frame_data),
-            )
-            db.add(frame)
-            segment.frame_count += 1
-            camera.last_seen_at = captured_at
-            camera.status = "running"
-            db.flush()
-
-            detections = frame_data.metadata.get("detections") or []
-            for detection in detections:
-                db.add(
-                    Detection(
-                        frame_id=frame.id,
-                        label=str(detection.get("label") or detection.get("class_name") or "unknown"),
-                        confidence=detection.get("confidence"),
-                        track_id=detection.get("track_id"),
-                        bbox=detection.get("bbox"),
-                        attributes={
-                            k: v
-                            for k, v in detection.items()
-                            if k not in {"label", "class_name", "confidence", "track_id", "bbox"}
-                        },
+                    segment = self._ensure_active_segment(camera, db, frame_data.timestamp)
+                    captured_at = datetime.fromtimestamp(frame_data.timestamp, tz=UTC)
+                    frame = FrameMetadata(
+                        camera_id=camera.id,
+                        segment_id=segment.id,
+                        frame_number=frame_data.frame_number,
+                        captured_at=captured_at,
+                        width=int(frame_data.frame.shape[1]),
+                        height=int(frame_data.frame.shape[0]),
+                        ingest_latency_ms=round(max(0.0, (datetime.now(UTC) - captured_at).total_seconds() * 1000), 3),
+                        has_detections=bool(frame_data.metadata.get("detections")),
+                        attributes=self._build_frame_attributes(frame_data),
                     )
-                )
+                    db.add(frame)
+                    segment.frame_count += 1
+                    camera.last_seen_at = captured_at
+                    camera.status = "running"
+                    db.flush()
 
-            if detections:
-                self._create_event(
-                    db,
-                    camera_id=camera.id,
-                    segment_id=segment.id,
-                    frame_id=frame.id,
-                    event_type="detections_received",
-                    payload={"detection_count": len(detections)},
-                )
+                    detections = frame_data.metadata.get("detections") or []
+                    for detection in detections:
+                        db.add(
+                            Detection(
+                                frame_id=frame.id,
+                                label=str(detection.get("label") or detection.get("class_name") or "unknown"),
+                                confidence=detection.get("confidence"),
+                                track_id=detection.get("track_id"),
+                                bbox=detection.get("bbox"),
+                                attributes={
+                                    k: v
+                                    for k, v in detection.items()
+                                    if k not in {"label", "class_name", "confidence", "track_id", "bbox"}
+                                },
+                            )
+                        )
 
-            self._append_metadata_line(segment, frame)
-            db.commit()
+                    keyframe_path = self._save_keyframe_image(segment, frame, frame_data)
+                    if keyframe_path:
+                        attributes = dict(frame.attributes)
+                        keyframe_meta = dict(attributes.get("keyframe") or {})
+                        keyframe_meta["path"] = keyframe_path
+                        attributes["keyframe"] = keyframe_meta
+                        frame.attributes = attributes
 
-            with self.lock:
-                state = self.runtime.get(camera.id) or RuntimeState(camera_id=camera.id, source_id=camera.source_id)
-                state.pipeline_status = "running"
-                state.active_segment_id = segment.id
-                state.last_frame_number = frame.frame_number
-                state.last_frame_at = frame.captured_at
-                state.frames_persisted += 1
-                self.runtime[camera.id] = state
+                    analysis = frame_data.metadata.get("analysis") or {}
+                    event_meta = analysis.get("event") or {}
+                    if event_meta.get("should_emit"):
+                        payload = dict(event_meta.get("payload") or {})
+                        descriptions = dict(frame_data.metadata.get("descriptions") or {})
+                        if descriptions:
+                            payload["descriptions"] = descriptions
+                        if keyframe_path:
+                            payload["keyframe_path"] = keyframe_path
+                        self._create_event(
+                            db,
+                            camera_id=camera.id,
+                            segment_id=segment.id,
+                            frame_id=frame.id,
+                            event_type=str(event_meta.get("event_type") or "semantic_event"),
+                            payload=payload,
+                            importance_score=event_meta.get("importance_score"),
+                        )
+
+                    if detections:
+                        self._create_event(
+                            db,
+                            camera_id=camera.id,
+                            segment_id=segment.id,
+                            frame_id=frame.id,
+                            event_type="detections_received",
+                            payload={"detection_count": len(detections)},
+                        )
+
+                    self._append_metadata_line(segment, frame)
+
+                    with self.lock:
+                        state = self.runtime.get(camera.id) or RuntimeState(camera_id=camera.id, source_id=camera.source_id)
+                        state.pipeline_status = "running"
+                        state.active_segment_id = segment.id
+                        state.last_frame_number = frame.frame_number
+                        state.last_frame_at = frame.captured_at
+                        state.frames_persisted += 1
+                        self.runtime[camera.id] = state
+
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.exception("Frame batch transaction failed", extra={"event": "frame_batch_transaction_failed"})
+                raise
 
     def _build_source_config(self, camera: Camera) -> VideoSourceConfig:
         payload = {
@@ -300,26 +352,35 @@ class CameraPipelineService:
                 payload={"segment_index": segment.segment_index},
             )
 
-        last_segment = db.scalar(
-            select(VideoSegment)
-            .where(VideoSegment.camera_id == camera.id)
-            .order_by(VideoSegment.segment_index.desc())
-            .limit(1)
-        )
-        segment_index = 1 if last_segment is None else last_segment.segment_index + 1
-        storage_dir = self._segment_storage_dir(camera.id, now, segment_index)
-        storage_dir.mkdir(parents=True, exist_ok=True)
+        for _ in range(3):
+            last_segment = db.scalar(
+                select(VideoSegment)
+                .where(VideoSegment.camera_id == camera.id)
+                .order_by(VideoSegment.segment_index.desc())
+                .limit(1)
+            )
+            segment_index = 1 if last_segment is None else last_segment.segment_index + 1
+            storage_dir = self._segment_storage_dir(camera.id, now, segment_index)
+            storage_dir.mkdir(parents=True, exist_ok=True)
 
-        segment = VideoSegment(
-            camera_id=camera.id,
-            segment_index=segment_index,
-            status="open",
-            storage_path=str(storage_dir),
-            metadata_path=str(storage_dir / "frames.jsonl"),
-            started_at=now,
-        )
-        db.add(segment)
-        db.flush()
+            try:
+                with db.begin_nested():
+                    segment = VideoSegment(
+                        camera_id=camera.id,
+                        segment_index=segment_index,
+                        status="open",
+                        storage_path=str(storage_dir),
+                        metadata_path=str(storage_dir / "frames.jsonl"),
+                        started_at=now,
+                    )
+                    db.add(segment)
+                    db.flush()
+                break
+            except IntegrityError:
+                db.expire_all()
+                continue
+        else:
+            raise RuntimeError(f"Unable to allocate unique segment for camera {camera.id}")
 
         with self.lock:
             state = self.runtime.get(camera.id) or RuntimeState(camera_id=camera.id, source_id=camera.source_id)
@@ -423,6 +484,20 @@ class CameraPipelineService:
         )
 
     @staticmethod
+    def _save_keyframe_image(segment: VideoSegment, frame: FrameMetadata, frame_data: ProcessedFrame) -> str | None:
+        import cv2
+
+        keyframe_meta = frame_data.metadata.get("keyframe") or {}
+        if not keyframe_meta.get("should_save"):
+            return None
+
+        keyframes_dir = Path(segment.storage_path) / "keyframes"
+        keyframes_dir.mkdir(parents=True, exist_ok=True)
+        keyframe_path = keyframes_dir / f"frame_{frame.frame_number:09d}_{frame.id}.jpg"
+        cv2.imwrite(str(keyframe_path), frame_data.frame)
+        return str(keyframe_path)
+
+    @staticmethod
     def _create_event(
         db,
         camera_id: int,
@@ -430,6 +505,7 @@ class CameraPipelineService:
         payload: dict[str, Any],
         segment_id: int | None = None,
         frame_id: int | None = None,
+        importance_score: float | None = None,
     ) -> None:
         db.add(
             Event(
@@ -437,6 +513,7 @@ class CameraPipelineService:
                 segment_id=segment_id,
                 frame_id=frame_id,
                 event_type=event_type,
+                importance_score=importance_score,
                 payload=payload,
             )
         )
