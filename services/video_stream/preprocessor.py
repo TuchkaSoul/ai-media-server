@@ -6,7 +6,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from .models import FrameData
+from .models import FrameData, ProcessedFrame
 
 
 @dataclass(slots=True)
@@ -89,7 +89,7 @@ class ScenePreprocessor:
         self._state_by_source: dict[str, TemporalState] = {}
         self._face_detector = self._build_face_detector()
 
-    def process(self, frame_data: FrameData) -> FrameData:
+    def process(self, frame_data: FrameData) -> ProcessedFrame:
         gray = cv2.cvtColor(frame_data.frame, cv2.COLOR_BGR2GRAY)
         gray_small = cv2.resize(gray, (320, 180))
 
@@ -106,7 +106,7 @@ class ScenePreprocessor:
             level = self._to_level(score, anomaly_score, state.consecutive_anomaly_frames, event_state)
             self._update_baseline(state, features.as_vector())
 
-        frame_data.metadata["scene"] = SceneScore(
+        scene = SceneScore(
             score=score,
             signal_score=signal_score,
             structural_score=structural_score,
@@ -119,7 +119,22 @@ class ScenePreprocessor:
             event_state=event_state,
             level=level,
         ).to_dict()
-        return frame_data
+
+        metadata = dict(frame_data.metadata)
+        metadata["scene"] = scene
+        metadata["frame_number"] = frame_data.frame_number
+
+        return ProcessedFrame(
+            frame=frame_data.frame.copy(),
+            timestamp=frame_data.timestamp,
+            camera_id=frame_data.source_id,
+            motion_score=features.motion_score,
+            anomaly_score=anomaly_score,
+            scene_score=score,
+            is_event=event_state in {"anomaly_detected", "important_event"},
+            metadata=metadata,
+            frame_number=frame_data.frame_number,
+        )
 
     def _extract_features(self, gray: np.ndarray, previous_gray: np.ndarray | None) -> SceneFeatures:
         motion_score, brightness_shift = self._calculate_motion_features(gray, previous_gray)

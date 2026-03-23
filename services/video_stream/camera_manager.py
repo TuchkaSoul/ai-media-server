@@ -2,23 +2,18 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable
 
 import cv2
 
 from common.structured_logging import get_logger
-from .models import FrameData, VideoSourceConfig, VideoSourceType
+from .consumer import DebugConsumer
+from .frame_queue import ProcessedFrameQueue
+from .models import ProcessedFrame, VideoSourceConfig, VideoSourceType
 from .preprocessor import ScenePreprocessor
 from .stream_reader import StreamReader
 
 logger = get_logger(__name__)
-
-
-class FrameProcessor(Protocol):
-    """Протокол для этапов обработки кадра внутри менеджера."""
-
-    def process(self, frame_data: FrameData) -> FrameData:
-        ...
 
 
 class VideoSourceFactory:
@@ -86,17 +81,20 @@ class VideoSourceFactory:
 
 
 class CameraManager:
-    """Менеджер нескольких источников и цепочки лёгкой обработки кадров."""
+    """Оркестратор pipeline `source -> queue -> preprocess -> queue -> consumer`."""
 
     def __init__(self) -> None:
         self.sources: dict[str, StreamReader] = {}
+        self.processed_queues: dict[str, ProcessedFrameQueue] = {}
         self.lock = threading.RLock()
         self.running = False
-        self.frame_handlers: list[Callable[[FrameData], None]] = []
-        self.frame_processors: list[FrameProcessor] = [ScenePreprocessor()]
+        self.frame_handlers: list[Callable[[ProcessedFrame], None]] = [DebugConsumer().handle]
+        self.preprocessor = ScenePreprocessor()
         self.stats_interval = 5.0
         self.last_stats_time = time.time()
         self._monitor_thread: threading.Thread | None = None
+        self._pipeline_threads: dict[str, threading.Thread] = {}
+        self._pipeline_stop_events: dict[str, threading.Event] = {}
 
     def add_source(self, config: VideoSourceConfig) -> bool:
         with self.lock:
@@ -111,11 +109,13 @@ class CameraManager:
             if reader is None:
                 return False
 
-            reader.register_frame_callback(self._dispatch_frame_handlers)
             self.sources[config.source_id] = reader
+            self.processed_queues[config.source_id] = ProcessedFrameQueue(config.buffer_size)
+            self._pipeline_stop_events[config.source_id] = threading.Event()
 
             if self.running:
                 reader.start_capture()
+                self._start_pipeline_worker(config.source_id, reader)
 
             logger.info(
                 "Источник зарегистрирован",
@@ -132,8 +132,16 @@ class CameraManager:
     def remove_source(self, source_id: str) -> None:
         with self.lock:
             reader = self.sources.pop(source_id, None)
+            self.processed_queues.pop(source_id, None)
+            stop_event = self._pipeline_stop_events.pop(source_id, None)
+            worker = self._pipeline_threads.pop(source_id, None)
+
+        if stop_event is not None:
+            stop_event.set()
         if reader is not None:
             reader.stop_capture()
+        if worker and worker.is_alive():
+            worker.join(timeout=2.0)
             logger.info("Источник удален", extra={"event": "source_removed", "source_id": source_id})
 
     def has_source(self, source_id: str) -> bool:
@@ -146,14 +154,24 @@ class CameraManager:
         if reader is None:
             return False
         reader.start_capture()
+        self._start_pipeline_worker(source_id, reader)
         return True
 
     def stop_source(self, source_id: str) -> bool:
         with self.lock:
             reader = self.sources.get(source_id)
+            stop_event = self._pipeline_stop_events.get(source_id)
+            worker = self._pipeline_threads.get(source_id)
         if reader is None:
             return False
+        if stop_event is not None:
+            stop_event.set()
         reader.stop_capture()
+        if worker and worker.is_alive():
+            worker.join(timeout=2.0)
+        with self.lock:
+            self._pipeline_threads.pop(source_id, None)
+            self._pipeline_stop_events[source_id] = threading.Event()
         return True
 
     def start_all(self) -> None:
@@ -165,6 +183,10 @@ class CameraManager:
 
         for reader in readers:
             reader.start_capture()
+        with self.lock:
+            source_items = list(self.sources.items())
+        for source_id, reader in source_items:
+            self._start_pipeline_worker(source_id, reader)
 
         self._monitor_thread = threading.Thread(target=self._monitor_stats, name="camera-manager-monitor", daemon=True)
         self._monitor_thread.start()
@@ -173,51 +195,64 @@ class CameraManager:
         with self.lock:
             self.running = False
             readers = list(self.sources.values())
+            stop_items = list(self._pipeline_stop_events.items())
+            workers = list(self._pipeline_threads.values())
 
+        for _, stop_event in stop_items:
+            stop_event.set()
         for reader in readers:
             reader.stop_capture()
-
-    def get_frame(self, source_id: str, timeout: float = 1.0) -> FrameData | None:
+        for worker in workers:
+            if worker.is_alive():
+                worker.join(timeout=2.0)
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=2.0)
         with self.lock:
-            reader = self.sources.get(source_id)
-        if reader is None:
+            self._pipeline_threads.clear()
+            for source_id in list(self._pipeline_stop_events.keys()):
+                self._pipeline_stop_events[source_id] = threading.Event()
+
+    def get_frame(self, source_id: str, timeout: float = 1.0) -> ProcessedFrame | None:
+        with self.lock:
+            queue = self.processed_queues.get(source_id)
+        if queue is None:
             return None
-        return reader.get_frame(timeout)
+        return queue.get(timeout)
 
-    def get_all_frames(self, timeout: float = 0.1) -> dict[str, FrameData | None]:
+    def get_all_frames(self, timeout: float = 0.1) -> dict[str, ProcessedFrame | None]:
         with self.lock:
-            items = list(self.sources.items())
-        return {source_id: reader.get_frame(timeout) for source_id, reader in items}
+            items = list(self.processed_queues.items())
+        return {source_id: queue.get(timeout) for source_id, queue in items}
 
-    def register_frame_handler(self, handler: Callable[[FrameData], None]) -> None:
+    def register_frame_handler(self, handler: Callable[[ProcessedFrame], None]) -> None:
         self.frame_handlers.append(handler)
-
-    def add_frame_processor(self, processor: FrameProcessor) -> None:
-        self.frame_processors.append(processor)
 
     def get_source_info(self, source_id: str) -> dict[str, Any] | None:
         with self.lock:
             reader = self.sources.get(source_id)
+            processed_queue = self.processed_queues.get(source_id)
+            worker = self._pipeline_threads.get(source_id)
         if reader is None:
             return None
         return {
             "source_id": source_id,
             "config": reader.config.to_dict(),
-            "stats": reader.get_stats(),
+            "stats": {
+                **reader.get_stats(),
+                "processed_queue_size": processed_queue.qsize() if processed_queue else 0,
+                "processed_frames_dropped": processed_queue.dropped_frames if processed_queue else 0,
+                "pipeline_worker_alive": worker.is_alive() if worker else False,
+            },
             "status": reader.status.value,
         }
 
     def get_all_source_info(self) -> dict[str, dict[str, Any]]:
         with self.lock:
-            items = list(self.sources.items())
+            source_ids = list(self.sources.keys())
         return {
-            source_id: {
-                "source_id": source_id,
-                "config": reader.config.to_dict(),
-                "stats": reader.get_stats(),
-                "status": reader.status.value,
-            }
-            for source_id, reader in items
+            source_id: info
+            for source_id in source_ids
+            if (info := self.get_source_info(source_id)) is not None
         }
 
     def auto_discover_usb_cameras(self) -> list[dict[str, Any]]:
@@ -240,21 +275,63 @@ class CameraManager:
             cap.release()
         return discovered
 
-    def _dispatch_frame_handlers(self, frame_data: FrameData) -> None:
-        processed_frame = frame_data
-        for processor in self.frame_processors:
+    def _start_pipeline_worker(self, source_id: str, reader: StreamReader) -> None:
+        with self.lock:
+            existing = self._pipeline_threads.get(source_id)
+            if existing and existing.is_alive():
+                return
+
+            stop_event = self._pipeline_stop_events.get(source_id)
+            if stop_event is None or stop_event.is_set():
+                stop_event = threading.Event()
+                self._pipeline_stop_events[source_id] = stop_event
+
+            worker = threading.Thread(
+                target=self._pipeline_loop,
+                args=(source_id, reader, stop_event),
+                name=f"pipeline-worker-{source_id}",
+                daemon=True,
+            )
+            self._pipeline_threads[source_id] = worker
+            worker.start()
+
+    def _pipeline_loop(self, source_id: str, reader: StreamReader, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            frame_data = reader.get_frame(timeout=0.2)
+            if frame_data is None:
+                if not reader.running and reader.get_stats().get("queue_size", 0) == 0:
+                    break
+                continue
+
             try:
-                processed_frame = processor.process(processed_frame)
-            except Exception as exc:
+                processed_frame = self.preprocessor.process(frame_data)
+            except Exception:
                 logger.exception(
                     "Ошибка этапа обработки кадра",
-                    extra={"event": "frame_processor_error", "processor": processor.__class__.__name__},
+                    extra={"event": "frame_processor_error", "processor": self.preprocessor.__class__.__name__},
                 )
+                continue
 
+            with self.lock:
+                processed_queue = self.processed_queues.get(source_id)
+            if processed_queue is None:
+                break
+
+            buffered = processed_queue.put(processed_frame)
+            if not buffered:
+                logger.warning(
+                    "Processed frame dropped",
+                    extra={"event": "processed_frame_dropped", "source_id": source_id},
+                )
+                continue
+
+            self._dispatch_frame_handlers(processed_frame)
+
+    def _dispatch_frame_handlers(self, frame_data: ProcessedFrame) -> None:
         for handler in self.frame_handlers:
             try:
-                handler(processed_frame)
-            except Exception as exc:
+                handler(frame_data)
+            except Exception:
                 logger.exception("Ошибка обработчика кадра", extra={"event": "frame_handler_error"})
 
     def _monitor_stats(self) -> None:

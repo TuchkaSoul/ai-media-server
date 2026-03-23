@@ -4,7 +4,7 @@ import cv2
 
 from common.structured_logging import get_logger, setup_logging
 from .camera_manager import CameraManager, VideoSourceFactory
-from .models import ConnectionStatus, FrameData, VideoSourceConfig, VideoSourceType
+from .models import ConnectionStatus, ProcessedFrame, VideoSourceConfig, VideoSourceType
 from .preprocessor import ScenePreprocessor, SceneScore
 from .stream_reader import StreamReader
 

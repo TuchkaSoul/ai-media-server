@@ -90,3 +90,22 @@ class FrameData:
     frame_number: int
     source_id: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class ProcessedFrame:
+    """Результат предобработки без мутации исходного FrameData."""
+
+    frame: np.ndarray
+    timestamp: float
+    camera_id: str
+    motion_score: float
+    anomaly_score: float
+    scene_score: float
+    is_event: bool
+    metadata: dict[str, Any] = field(default_factory=dict)
+    frame_number: int = 0
+
+    @property
+    def source_id(self) -> str:
+        return self.camera_id

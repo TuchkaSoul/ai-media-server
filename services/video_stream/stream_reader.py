@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -29,7 +29,6 @@ class StreamReader:
         self.config = config
         self.status = ConnectionStatus.DISCONNECTED
         self.frame_buffer = FrameBuffer(config.buffer_size)
-        self.frame_callbacks: list[Callable[[FrameData], None]] = []
         self.lock = threading.RLock()
         self.thread: threading.Thread | None = None
         self.cap: cv2.VideoCapture | None = None
@@ -48,9 +47,6 @@ class StreamReader:
             "reconnect_attempts": 0,
             "avg_fps": 0.0,
         }
-
-    def register_frame_callback(self, callback: Callable[[FrameData], None]) -> None:
-        self.frame_callbacks.append(callback)
 
     def connect(self) -> bool:
         with self.lock:
@@ -257,15 +253,6 @@ class StreamReader:
 
         if self.frame_count % 30 == 0:
             self._update_fps_stats()
-
-        for callback in self.frame_callbacks:
-            try:
-                callback(frame_data)
-            except Exception as exc:
-                logger.exception(
-                    "Ошибка frame callback",
-                    extra={"event": "frame_callback_error", "source_id": self.config.source_id},
-                )
 
     def _update_fps_stats(self) -> None:
         now = time.monotonic()

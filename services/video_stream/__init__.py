@@ -1,7 +1,8 @@
 """Публичный интерфейс пакета video_stream."""
 
 from .camera_manager import CameraManager, VideoSourceFactory
-from .models import ConnectionStatus, FrameData, VideoSourceConfig, VideoSourceType
+from .consumer import DebugConsumer
+from .models import ConnectionStatus, FrameData, ProcessedFrame, VideoSourceConfig, VideoSourceType
 from .preprocessor import ScenePreprocessor, SceneScore
 from .stream_reader import StreamReader
 
@@ -11,8 +12,10 @@ VideoSource = StreamReader
 __all__ = [
     "CameraManager",
     "ConnectionStatus",
+    "DebugConsumer",
     "FrameData",
     "MultiSourceManager",
+    "ProcessedFrame",
     "ScenePreprocessor",
     "SceneScore",
     "StreamReader",

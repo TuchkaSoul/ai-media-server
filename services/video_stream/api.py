@@ -14,8 +14,8 @@ from pydantic import BaseModel, Field
 
 from common.structured_logging import bind_log_context, new_trace_id, reset_log_context, setup_logging
 from .video_source_manager import (
-    FrameData,
     MultiSourceManager,
+    ProcessedFrame,
     VideoSourceConfig,
     VideoSourceFactory,
     VideoSourceType,
@@ -79,7 +79,7 @@ class RedisMetadataBridge:
                     extra={"event": "redis_bridge_init_error", "backend": "redis"},
                 )
 
-    def handle_frame(self, frame_data: FrameData) -> None:
+    def handle_frame(self, frame_data: ProcessedFrame) -> None:
         if not self.enabled or not self._client:
             return
 

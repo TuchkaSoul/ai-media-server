@@ -24,7 +24,7 @@ SERVICES_DIR = REPO_ROOT / "services"
 if str(SERVICES_DIR) not in sys.path:
     sys.path.append(str(SERVICES_DIR))
 
-from video_stream.video_source_manager import FrameData, MultiSourceManager, VideoSourceConfig, VideoSourceFactory
+from video_stream.video_source_manager import MultiSourceManager, ProcessedFrame, VideoSourceConfig, VideoSourceFactory
 
 
 @dataclass
@@ -198,7 +198,7 @@ class CameraPipelineService:
             db.refresh(frame)
             return frame
 
-    def handle_frame(self, frame_data: FrameData) -> None:
+    def handle_frame(self, frame_data: ProcessedFrame) -> None:
         with self.lock:
             camera_id = self.source_to_camera.get(frame_data.source_id)
         if camera_id is None:
@@ -406,7 +406,7 @@ class CameraPipelineService:
             file_obj.write(json.dumps(line, ensure_ascii=False) + "\n")
 
     @staticmethod
-    def _build_frame_attributes(frame_data: FrameData) -> dict[str, Any]:
+    def _build_frame_attributes(frame_data: ProcessedFrame) -> dict[str, Any]:
         metadata = dict(frame_data.metadata)
         metadata["source_id"] = frame_data.source_id
         metadata["shape"] = [int(value) for value in frame_data.frame.shape]
